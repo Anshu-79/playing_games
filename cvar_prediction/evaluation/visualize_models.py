@@ -9,7 +9,7 @@ from ml_models.lstm_quantile import LSTMQuantile
 from risk_models.caviar import train_caviar, generate_caviar
 from features.feature_engineering import build_features
 from features.windowing import make_sequences
-from evaluation.cvar_validation import tail_mae
+from evaluation.cvar_validation import compute_tail_metrics
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("EVAL-VIZ")
@@ -26,6 +26,25 @@ features = ["log_return", "vol_5", "vol_20", "vol_60", "drawdown"]
 X = df[features].values
 y = df["log_return"].values
 returns = y.copy()
+
+
+# --------------------
+# Helper: CVaR computation (rolling empirical, no NaNs)
+# --------------------
+def compute_cvar(ret, var, min_tail=20):
+    cvar = np.zeros(len(ret))
+
+    for i in range(len(ret)):
+        losses = -ret[: i + 1]
+        tail = losses[losses >= var[i]]
+
+        if len(tail) >= min_tail:
+            cvar[i] = tail.mean()
+        else:
+            cvar[i] = cvar[i - 1] if i > 0 else tail.mean() if len(tail) > 0 else 0.0
+
+    return cvar
+
 
 # --------------------
 # Load QRNN
@@ -68,31 +87,37 @@ params = train_caviar(returns, alpha=0.05)
 caviar_var = generate_caviar(params, returns, alpha=0.05)
 caviar_var = caviar_var[-len(q5_lstm) :]
 
+# Convert VaR to loss-domain threshold
+qrnn_var = np.abs(qrnn_var)
+q5_lstm = np.abs(q5_lstm)
+caviar_var = np.abs(caviar_var)
 
 # --------------------
 # CVaR computation
 # --------------------
-def compute_cvar(ret, var):
-    cvar = []
-    for i in range(len(ret)):
-        tail = ret[: i + 1][ret[: i + 1] <= var[i]]
-        if len(tail) > 5:
-            cvar.append(tail.mean())
-        else:
-            cvar.append(np.nan)
-    return np.array(cvar)
-
-
 qrnn_cvar = compute_cvar(returns_aligned, qrnn_var)
 lstm_cvar = compute_cvar(returns_aligned, q5_lstm)
 caviar_cvar = compute_cvar(returns_aligned, caviar_var)
 
+# empirical CVaR benchmark
+empirical_cvar = compute_cvar(returns_aligned, caviar_var)
+
 # --------------------
 # Metrics
 # --------------------
-logger.info(f"QRNN Tail MAE: {tail_mae(returns_aligned, qrnn_var, qrnn_cvar)}")
-logger.info(f"LSTM Tail MAE: {tail_mae(returns_aligned, q5_lstm, lstm_cvar)}")
-logger.info(f"CaViAR Tail MAE: {tail_mae(returns_aligned, caviar_var, caviar_cvar)}")
+metrics_qrnn = compute_tail_metrics(
+    returns_aligned, qrnn_var, empirical_cvar, qrnn_cvar
+)
+
+metrics_lstm = compute_tail_metrics(returns_aligned, q5_lstm, empirical_cvar, lstm_cvar)
+
+metrics_caviar = compute_tail_metrics(
+    returns_aligned, caviar_var, empirical_cvar, caviar_cvar
+)
+
+logger.info(f"QRNN metrics: {metrics_qrnn}")
+logger.info(f"LSTM metrics: {metrics_lstm}")
+logger.info(f"CaViAR metrics: {metrics_caviar}")
 
 # --------------------
 # Visualization
